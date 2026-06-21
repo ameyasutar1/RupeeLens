@@ -1,0 +1,236 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#f5f1e8">
+  <title>Personal Expense Intelligence</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=DM+Mono:wght@400;500&family=Manrope:wght@400;500;600;700&family=Playfair+Display:ital,wght@0,600;1,600&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="/styles.css">
+</head>
+<body>
+  <div class="noise"></div>
+  <header class="topbar">
+    <a class="brand" href="#"><span class="brand-mark">A</span><span>expense intelligence</span></a>
+    <div class="header-actions">
+      <span class="secure-pill"><i></i> Local & private</span>
+      <button class="upload-trigger" id="openUpload">＋ Import statement</button>
+      <button class="icon-button" id="refreshButton" aria-label="Refresh dashboard">↻</button>
+    </div>
+  </header>
+
+  <main>
+    <section class="hero">
+      <div>
+        <p class="eyebrow">FINANCIAL FIELD NOTES / 2025–26</p>
+        <h1>Your money,<br><em>made legible.</em></h1>
+        <p class="hero-copy">A clear account of where it went, what repeats, and what deserves a closer look.</p>
+      </div>
+      <div class="period-card">
+        <span>STATEMENT WINDOW</span>
+        <strong id="periodLabel">Loading...</strong>
+        <small id="transactionLabel">Reading statements</small>
+      </div>
+    </section>
+
+    <section class="ingestion-panel" id="uploadPanel">
+      <div>
+        <span class="kicker">THE DATA ROOM</span>
+        <h2>Drop in today’s statement.</h2>
+        <p>Upload one or more supported bank-statement CSV files. New transactions append to SQLite; overlaps and repeat files are safely skipped.</p>
+      </div>
+      <label class="drop-zone" id="dropZone">
+        <input type="file" id="statementFiles" accept=".csv,text/csv" multiple>
+        <span class="drop-icon">↥</span>
+        <strong>Choose CSV files</strong>
+        <small>or drag and drop them here · max 20 MB</small>
+      </label>
+      <div class="import-status">
+        <strong id="databaseCount">Preparing database…</strong>
+        <button id="showHistory">View import history</button>
+      </div>
+      <div class="import-history" id="importHistory" hidden></div>
+    </section>
+
+    <section class="filters" aria-label="Dashboard filters">
+      <label><span>From</span><input type="date" id="startDate"></label>
+      <label><span>To</span><input type="date" id="endDate"></label>
+      <label><span>Category</span><select id="categoryFilter"><option value="all">All activity</option></select></label>
+      <label><span>Direction</span><select id="directionFilter"><option value="all">Money in & out</option><option value="expense">Expenses only</option><option value="income">Income only</option></select></label>
+      <label><span>Method</span><select id="channelFilter"><option value="all">All methods</option></select></label>
+      <label><span>Minimum ₹</span><input type="number" id="minAmount" min="0" placeholder="0"></label>
+      <label><span>Maximum ₹</span><input type="number" id="maxAmount" min="0" placeholder="Any"></label>
+      <label class="search-field"><span>Find a payment</span><input type="search" id="searchInput" placeholder="Merchant or description"></label>
+      <button id="applyFilters">Apply view</button>
+      <button class="reset-button" id="resetFilters">Reset</button>
+    </section>
+
+    <section class="summary-grid">
+      <article class="metric-card primary">
+        <div class="metric-head"><span>TRUE SPENDING</span><i>01</i></div>
+        <strong id="spendTotal">₹0</strong>
+        <p>Purchases and bills, excluding transfers and investments.</p>
+        <div class="metric-foot"><span>Monthly pace</span><b id="monthlyAverage">₹0</b></div>
+      </article>
+      <article class="metric-card">
+        <div class="metric-head"><span>MONEY IN</span><i>02</i></div>
+        <strong id="incomeTotal">₹0</strong>
+        <p>Salary, deposits, refunds, interest and incoming transfers.</p>
+        <div class="metric-foot"><span>Net cash movement</span><b id="netTotal">₹0</b></div>
+      </article>
+      <article class="metric-card">
+        <div class="metric-head"><span>MONEY MOVED</span><i>03</i></div>
+        <strong id="transferTotal">₹0</strong>
+        <p>Person-to-person and account transfers, shown separately.</p>
+        <div class="metric-foot"><span>Investments</span><b id="investmentTotal">₹0</b></div>
+      </article>
+    </section>
+
+    <section class="adaptive-brief">
+      <div class="brief-heading">
+        <div><span class="kicker">ADAPTIVE INTELLIGENCE</span><h2 id="intelligenceHeadline">Building today’s financial narrative…</h2></div>
+        <button id="refreshIntelligence">Re-run analysis</button>
+      </div>
+      <p class="brief-summary" id="intelligenceSummary">Rules are recalculating trends, concentration, anomalies, and data quality from the current ledger.</p>
+      <div class="analyst-strip" id="adaptiveCards"></div>
+      <div class="adaptive-detail">
+        <div><span class="kicker">FINDINGS</span><div id="adaptiveFindings"></div></div>
+        <div><span class="kicker">WATCHLIST</span><div id="adaptiveWatchlist"></div></div>
+      </div>
+      <div class="pipeline-meta" id="pipelineMeta">Deterministic analysis + Gemini narrative</div>
+    </section>
+
+    <section class="ai-workspace" id="aiWorkspace">
+      <aside class="ai-profile">
+        <div class="agent-orb">अ</div>
+        <span class="kicker">YOUR FINANCIAL AGENT</span>
+        <h2>Meet Artha.</h2>
+        <p>Ask about spending, patterns, merchants, unusual payments, or what a transaction represented. Artha can investigate your ledger and prepare corrections for your approval.</p>
+        <div class="agent-status"><i></i><span>Gemini 2.5 Flash · LangChain tools</span></div>
+        <div class="prompt-starters">
+          <button>Where did most of my money go last month?</button>
+          <button>Show my biggest food expenses.</button>
+          <button>Find a recent food-delivery payment.</button>
+          <button>What expenses look recurring?</button>
+        </div>
+      </aside>
+      <div class="chat-shell">
+        <div class="chat-header">
+          <div><strong>Private analyst session</strong><small>Reads are automatic · edits always require approval</small></div>
+          <button id="clearChat">New conversation</button>
+        </div>
+        <div class="chat-messages" id="chatMessages">
+          <div class="message assistant">
+            <span>Artha</span>
+            <p>I’m ready. Ask me a financial question, or describe an expense you want corrected.</p>
+          </div>
+        </div>
+        <div class="pending-actions" id="pendingActions"></div>
+        <form class="chat-composer" id="chatForm">
+          <textarea id="chatInput" rows="1" placeholder="Ask: What was my largest travel expense last month?"></textarea>
+          <button type="submit" aria-label="Send message">↑</button>
+        </form>
+        <p class="chat-disclaimer">Artha can analyze and propose ledger changes. You remain the final approver.</p>
+      </div>
+    </section>
+
+    <section class="editorial-grid">
+      <article class="panel category-panel">
+        <div class="panel-title">
+          <div><span class="kicker">THE COMPOSITION</span><h2>Where spending lives</h2></div>
+          <span class="annotation">non-transfer spend</span>
+        </div>
+        <div class="category-layout">
+          <div class="donut-wrap">
+            <div class="donut" id="categoryDonut"><div><strong id="donutTotal">₹0</strong><span>total spent</span></div></div>
+          </div>
+          <div class="category-list" id="categoryList"></div>
+        </div>
+      </article>
+
+      <article class="panel insight-panel">
+        <div class="panel-title">
+          <div><span class="kicker">THE READOUT</span><h2>What stands out</h2></div>
+        </div>
+        <div id="insightList" class="insight-list"></div>
+      </article>
+    </section>
+
+    <section class="panel timeline-panel">
+      <div class="panel-title">
+        <div><span class="kicker">THE RHYTHM</span><h2>Monthly movement</h2></div>
+        <div class="legend"><span><i class="spend-dot"></i>Spend</span><span><i class="income-dot"></i>Income</span></div>
+      </div>
+      <div class="chart-shell">
+        <svg id="monthlyChart" role="img" aria-label="Monthly income and spending chart"></svg>
+      </div>
+    </section>
+
+    <section class="forecast-panel">
+      <div class="forecast-heading">
+        <div>
+          <span class="kicker">MACHINE-LEARNED OUTLOOK</span>
+          <h2>Your next <span id="forecastDaysTitle">7</span> days</h2>
+          <p id="forecastNarrative">Training XGBoost on your spending history…</p>
+        </div>
+        <label class="horizon-control">
+          <span>Forecast window</span>
+          <div><input type="range" id="forecastHorizon" min="7" max="30" value="7"><strong id="forecastHorizonValue">7 days</strong></div>
+        </label>
+      </div>
+      <div class="forecast-summary">
+        <article><span>PREDICTED SPEND</span><strong id="forecastTotal">—</strong><small id="forecastRange">Calculating range</small></article>
+        <article><span>DAILY AVERAGE</span><strong id="forecastAverage">—</strong><small>regular non-outlier spend</small></article>
+        <article><span>TOP PREDICTED CATEGORY</span><strong id="forecastTopCategory">—</strong><small id="forecastTopShare">highest expected share</small></article>
+        <article><span>MODEL CONFIDENCE</span><strong id="forecastConfidence">—</strong><small id="forecastMetric">80/20 holdout</small></article>
+      </div>
+      <div class="forecast-body">
+        <div class="forecast-chart-wrap">
+          <svg id="forecastChart" role="img" aria-label="Predicted daily spending chart"></svg>
+        </div>
+        <div class="forecast-category-list" id="forecastCategories"></div>
+      </div>
+      <div class="model-notes">
+        <span id="forecastTrainingNote">XGBoost · random 80/20 split</span>
+        <span id="forecastExclusions">Outliers removed with IQR</span>
+        <span id="forecastRetrained">Retrains after new CSV data</span>
+      </div>
+    </section>
+
+    <section class="editorial-grid lower-grid">
+      <article class="panel">
+        <div class="panel-title">
+          <div><span class="kicker">THE REGULARS</span><h2>Recurring merchants</h2></div>
+        </div>
+        <div class="merchant-list" id="recurringList"></div>
+      </article>
+      <article class="panel">
+        <div class="panel-title">
+          <div><span class="kicker">THE OUTLIERS</span><h2>Largest expenses</h2></div>
+        </div>
+        <div class="merchant-list" id="largestList"></div>
+      </article>
+    </section>
+
+    <section class="panel ledger-panel">
+      <div class="panel-title ledger-title">
+        <div><span class="kicker">THE LEDGER</span><h2>Every transaction, explained</h2></div>
+        <span class="annotation" id="ledgerCount">0 records</span>
+      </div>
+      <div class="table-wrap">
+        <table>
+          <thead><tr><th>Date</th><th>Merchant / detail</th><th>Category</th><th>Method</th><th>Amount</th></tr></thead>
+          <tbody id="transactionTable"></tbody>
+        </table>
+      </div>
+      <button class="load-more" id="loadMore">Show more transactions</button>
+    </section>
+  </main>
+
+  <div class="toast" id="toast" role="status"></div>
+  <footer><span>Persistent SQLite expense intelligence</span><span>Data stays on this machine · Duplicate-safe imports</span></footer>
+  <script src="/app.js"></script>
+</body>
+</html>

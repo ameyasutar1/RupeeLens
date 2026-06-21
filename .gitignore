@@ -1,0 +1,44 @@
+# Secrets and local configuration
+.env
+.env.*
+!.env.example
+
+# Private financial data
+*.csv
+*.db
+*.db-*
+*.sqlite
+*.sqlite3
+data/
+uploads/
+
+# Generated machine-learning artifacts
+artifacts/
+*.joblib
+*.pkl
+*.pickle
+
+# Python environments and caches
+.venv/
+venv/
+env/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# OS and editor files
+.DS_Store
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Logs and temporary output
+*.log
+tmp/
+temp/
+coverage.xml
+.coverage
+htmlcov/
