@@ -6,18 +6,22 @@ from __future__ import annotations
 import csv
 import hashlib
 import io
-import json
+import os
 import re
 import sqlite3
+from threading import Lock
 from collections import Counter, defaultdict
+from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from datetime import datetime
-from email.parser import BytesParser
-from email.policy import default
-from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Iterable
-from urllib.parse import parse_qs, urlparse
+
+import uvicorn
+from fastapi import FastAPI, File, Query, Request, UploadFile
+from fastapi.responses import JSONResponse, RedirectResponse, Response
+from fastapi.staticfiles import StaticFiles
+from pydantic import BaseModel
 
 from analytics_pipeline import (
     categories_by_type,
@@ -27,25 +31,55 @@ from analytics_pipeline import (
     initialize_pipeline,
     operating_categories,
 )
+from auth import (
+    SESSION_COOKIE,
+    authenticate,
+    bootstrap_environment_user,
+    create_session,
+    create_user,
+    initialize_auth,
+    login_rate_limited,
+    record_login_attempt,
+    revoke_session,
+    session_user,
+    signup_allowed,
+)
 from financial_agent import (
     approve_action,
+    approve_rule_proposal,
     chat_with_agent,
     list_chat_messages,
     list_pending_actions,
+    list_pending_rule_proposals,
     reject_action,
+    reject_rule_proposal,
 )
 from forecast_model import (
     forecast_spending,
     initialize_forecasting,
     train_forecast_model,
 )
+from runtime_config import (
+    IS_VERCEL,
+    STATIC_DIR,
+    database_path,
+    reset_current_user,
+    set_current_user,
+)
+from storage_backend import (
+    persist_auth_database,
+    persist_database,
+    restore_auth_database,
+    restore_database,
+    storage_status,
+)
 
 
 ROOT = Path(__file__).resolve().parent
-STATIC_DIR = ROOT / "static"
-DATABASE = ROOT / "expenses.db"
 STATEMENT_PATTERN = "AcctStatement_*.csv"
 MAX_UPLOAD_BYTES = 20 * 1024 * 1024
+READY_USERS: set[int] = set()
+RUNTIME_LOCK = Lock()
 
 
 @dataclass(frozen=True)
@@ -75,7 +109,7 @@ class Transaction:
 
 
 def connect() -> sqlite3.Connection:
-    connection = sqlite3.connect(DATABASE, timeout=30)
+    connection = sqlite3.connect(database_path(), timeout=30)
     connection.row_factory = sqlite3.Row
     connection.execute("PRAGMA busy_timeout = 30000")
     return connection
@@ -297,6 +331,8 @@ def import_statement(content: bytes, filename: str) -> dict:
 
 
 def bootstrap_existing_statements() -> None:
+    if IS_VERCEL:
+        return
     for path in sorted(ROOT.glob(STATEMENT_PATTERN)):
         import_statement(path.read_bytes(), path.name)
 
@@ -523,146 +559,364 @@ def import_history() -> list[dict]:
     return [dict(row) for row in rows]
 
 
-class DashboardHandler(SimpleHTTPRequestHandler):
-    def __init__(self, *args, **kwargs):
-        super().__init__(*args, directory=str(STATIC_DIR), **kwargs)
+class AgentChatRequest(BaseModel):
+    message: str
+    thread_id: str = "default"
 
-    def send_json(self, payload: dict | list, status: int = 200) -> None:
-        body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
-        self.send_response(status)
-        self.send_header("Content-Type", "application/json; charset=utf-8")
-        self.send_header("Content-Length", str(len(body)))
-        self.send_header("Cache-Control", "no-store")
-        self.end_headers()
-        self.wfile.write(body)
 
-    def do_GET(self) -> None:
-        parsed = urlparse(self.path)
-        if parsed.path == "/api/dashboard":
-            self.send_json(dashboard_payload(filtered_transactions(parse_qs(parsed.query))))
+class AuthCredentials(BaseModel):
+    username: str
+    password: str
+
+
+class RegistrationRequest(AuthCredentials):
+    display_name: str = ""
+    signup_code: str = ""
+
+
+def ensure_user_runtime(user_id: int) -> None:
+    if user_id in READY_USERS:
+        return
+    with RUNTIME_LOCK:
+        if user_id in READY_USERS:
             return
-        if parsed.path == "/api/imports":
-            self.send_json(import_history())
-            return
-        if parsed.path == "/api/intelligence":
-            force = parse_qs(parsed.query).get("force", ["false"])[0].lower() == "true"
-            self.send_json(generate_intelligence(force=force))
-            return
-        if parsed.path == "/api/forecast":
+        restore_database()
+        initialize_database()
+        initialize_pipeline()
+        initialize_forecasting()
+        READY_USERS.add(user_id)
+
+
+@asynccontextmanager
+async def lifespan(_: FastAPI):
+    restore_auth_database()
+    initialize_auth()
+    try:
+        bootstrap_environment_user()
+    except ValueError as error:
+        print(f"Authentication bootstrap skipped: {error}")
+    persist_auth_database()
+    print("RupeeLens authentication and per-user storage initialized.")
+    yield
+
+
+app = FastAPI(
+    title="Expense Intelligence API",
+    version="1.0.0",
+    lifespan=lifespan,
+)
+
+
+@app.middleware("http")
+async def security_headers(request: Request, call_next):
+    response = await call_next(request)
+    response.headers["X-Content-Type-Options"] = "nosniff"
+    response.headers["X-Frame-Options"] = "DENY"
+    response.headers["Referrer-Policy"] = "strict-origin-when-cross-origin"
+    response.headers["Permissions-Policy"] = "camera=(), microphone=(), geolocation=()"
+    response.headers["Content-Security-Policy"] = (
+        "default-src 'self'; "
+        "script-src 'self'; "
+        "style-src 'self' https://fonts.googleapis.com; "
+        "font-src https://fonts.gstatic.com; "
+        "img-src 'self' data:; "
+        "connect-src 'self'; "
+        "frame-ancestors 'none'; "
+        "base-uri 'self'; "
+        "form-action 'self'"
+    )
+    if IS_VERCEL:
+        response.headers["Strict-Transport-Security"] = (
+            "max-age=31536000; includeSubDomains"
+        )
+    if request.url.path.startswith("/api/auth/"):
+        response.headers["Cache-Control"] = "no-store"
+    return response
+
+
+@app.middleware("http")
+async def authenticate_dashboard(request: Request, call_next):
+    public_paths = {
+        "/login.html", "/login.js", "/styles.css",
+        "/api/auth/login", "/api/auth/register", "/api/auth/status",
+    }
+    path = request.url.path
+    if path in public_paths or path.startswith("/favicon"):
+        return await call_next(request)
+
+    user = session_user(request.cookies.get(SESSION_COOKIE, ""))
+    if not user:
+        if path.startswith("/api/"):
+            return JSONResponse({"error": "Authentication required."}, status_code=401)
+        return RedirectResponse("/login.html", status_code=303)
+
+    if request.method not in {"GET", "HEAD", "OPTIONS"}:
+        origin = request.headers.get("origin", "")
+        expected_origin = f"{request.url.scheme}://{request.url.netloc}"
+        if origin and origin != expected_origin:
+            return JSONResponse({"error": "Cross-site request rejected."}, status_code=403)
+
+    request.state.user = user
+    token = set_current_user(user["id"])
+    try:
+        ensure_user_runtime(user["id"])
+        return await call_next(request)
+    finally:
+        reset_current_user(token)
+
+
+def error_response(message: str, status_code: int) -> JSONResponse:
+    return JSONResponse({"error": message}, status_code=status_code)
+
+
+def set_session_cookie(response: Response, token: str) -> None:
+    response.set_cookie(
+        SESSION_COOKIE,
+        token,
+        max_age=30 * 24 * 60 * 60,
+        httponly=True,
+        secure=IS_VERCEL,
+        samesite="strict",
+        path="/",
+    )
+
+
+@app.get("/api/auth/status")
+def get_auth_status():
+    return {
+        "signup_available": signup_allowed("") or bool(os.getenv("RUPEELENS_SIGNUP_CODE")),
+        "signup_code_required": bool(os.getenv("RUPEELENS_SIGNUP_CODE")),
+    }
+
+
+@app.post("/api/auth/register")
+def register_account(payload: RegistrationRequest, request: Request):
+    try:
+        user = create_user(
+            payload.username,
+            payload.password,
+            payload.display_name,
+            payload.signup_code,
+        )
+        token, _ = create_session(user["id"], request.headers.get("user-agent", ""))
+        persist_auth_database()
+        response = JSONResponse({"user": user}, status_code=201)
+        set_session_cookie(response, token)
+        return response
+    except ValueError as error:
+        return error_response(str(error), 400)
+
+
+@app.post("/api/auth/login")
+def login_account(payload: AuthCredentials, request: Request):
+    remote_address = request.client.host if request.client else "unknown"
+    if login_rate_limited(payload.username, remote_address):
+        return error_response(
+            "Too many failed attempts. Try again in 15 minutes.",
+            429,
+        )
+    user = authenticate(payload.username, payload.password)
+    if not user:
+        record_login_attempt(payload.username, remote_address, False)
+        persist_auth_database()
+        return error_response("Invalid username or password.", 401)
+    record_login_attempt(payload.username, remote_address, True)
+    token, _ = create_session(user["id"], request.headers.get("user-agent", ""))
+    persist_auth_database()
+    response = JSONResponse({"user": user})
+    set_session_cookie(response, token)
+    return response
+
+
+@app.get("/api/auth/me")
+def get_current_account(request: Request):
+    return {"user": request.state.user}
+
+
+@app.post("/api/auth/logout")
+def logout_account(request: Request):
+    revoke_session(request.cookies.get(SESSION_COOKIE, ""))
+    persist_auth_database()
+    response = JSONResponse({"status": "logged_out"})
+    response.delete_cookie(SESSION_COOKIE, path="/")
+    return response
+
+
+@app.get("/api/dashboard")
+def get_dashboard(
+    start: str = "",
+    end: str = "",
+    category: str = "all",
+    direction: str = "all",
+    channel: str = "all",
+    q: str = "",
+    min_amount: str = Query(default="", alias="min"),
+    max_amount: str = Query(default="", alias="max"),
+):
+    params = {
+        "start": [start],
+        "end": [end],
+        "category": [category],
+        "direction": [direction],
+        "channel": [channel],
+        "q": [q],
+        "min": [min_amount],
+        "max": [max_amount],
+    }
+    try:
+        return dashboard_payload(filtered_transactions(params))
+    except ValueError as error:
+        return error_response(str(error), 400)
+
+
+@app.get("/api/imports")
+def get_imports():
+    return import_history()
+
+
+@app.get("/api/runtime")
+def get_runtime():
+    return storage_status()
+
+
+@app.get("/api/intelligence")
+def get_intelligence(force: bool = False):
+    result = generate_intelligence(force=force)
+    persist_database()
+    return result
+
+
+@app.get("/api/forecast")
+def get_forecast(horizon: int = Query(default=7, ge=7, le=30)):
+    try:
+        result = forecast_spending(horizon)
+        persist_database()
+        return result
+    except ValueError as error:
+        return error_response(str(error), 400)
+    except Exception as error:
+        return error_response(f"Forecast failed: {error}", 500)
+
+
+@app.get("/api/agent/actions")
+def get_agent_actions():
+    return list_pending_actions()
+
+
+@app.get("/api/agent/messages")
+def get_agent_messages(thread_id: str = "default"):
+    return list_chat_messages(thread_id)
+
+
+@app.get("/api/agent/rules")
+def get_agent_rule_proposals():
+    return list_pending_rule_proposals()
+
+
+@app.post("/api/agent/chat")
+def post_agent_chat(payload: AgentChatRequest):
+    message = payload.message.strip()
+    thread_id = payload.thread_id.strip() or "default"
+    if not message:
+        return error_response("Message cannot be empty.", 400)
+    try:
+        result = chat_with_agent(message, thread_id)
+        persist_database()
+        return result
+    except ValueError as error:
+        return error_response(str(error), 400)
+    except Exception as error:
+        return error_response(f"Agent request failed: {error}", 500)
+
+
+@app.post("/api/agent/actions/{action_id}/{operation}")
+def resolve_agent_action(
+    action_id: int,
+    operation: str,
+):
+    if operation not in {"approve", "reject"}:
+        return error_response("Operation must be approve or reject.", 400)
+    try:
+        result = approve_action(action_id) if operation == "approve" else reject_action(action_id)
+        persist_database()
+        return result
+    except ValueError as error:
+        return error_response(str(error), 400)
+
+
+@app.post("/api/agent/rules/{proposal_id}/{operation}")
+def resolve_agent_rule_proposal(
+    proposal_id: int,
+    operation: str,
+):
+    if operation not in {"approve", "reject"}:
+        return error_response("Operation must be approve or reject.", 400)
+    try:
+        result = (
+            approve_rule_proposal(proposal_id)
+            if operation == "approve"
+            else reject_rule_proposal(proposal_id)
+        )
+        persist_database()
+        return result
+    except ValueError as error:
+        return error_response(str(error), 400)
+
+
+@app.post("/api/upload")
+async def upload_statements(
+    statements: list[UploadFile] = File(...),
+):
+    try:
+        results = []
+        total_size = 0
+        for upload in statements:
+            filename = Path(upload.filename or "statement.csv").name
+            if not filename.lower().endswith(".csv"):
+                raise ValueError(f"{filename}: only CSV statements are supported.")
+            content = await upload.read()
+            total_size += len(content)
+            if total_size > MAX_UPLOAD_BYTES:
+                raise ValueError("Combined upload size must not exceed 20 MB.")
+            results.append(import_statement(content, filename))
+        if not results:
+            raise ValueError("No CSV file was attached.")
+
+        added = sum(result["added"] for result in results)
+        forecast_retrained = False
+        forecast_warning = ""
+        if added:
             try:
-                horizon = int(parse_qs(parsed.query).get("horizon", ["7"])[0])
-                self.send_json(forecast_spending(horizon))
-            except ValueError as error:
-                self.send_json({"error": str(error)}, 400)
+                train_forecast_model(force=True)
+                forecast_retrained = True
             except Exception as error:
-                self.send_json({"error": f"Forecast failed: {error}"}, 500)
-            return
-        if parsed.path == "/api/agent/actions":
-            self.send_json(list_pending_actions())
-            return
-        if parsed.path == "/api/agent/messages":
-            thread_id = parse_qs(parsed.query).get("thread_id", ["default"])[0]
-            self.send_json(list_chat_messages(thread_id))
-            return
-        if parsed.path == "/":
-            self.path = "/index.html"
-        super().do_GET()
+                forecast_warning = str(error)
+        persist_database()
+        return {
+            "results": results,
+            "history": import_history(),
+            "intelligence_stale": added > 0,
+            "forecast_retrained": forecast_retrained,
+            "forecast_warning": forecast_warning,
+        }
+    except (ValueError, csv.Error) as error:
+        return error_response(str(error), 400)
+    except Exception as error:
+        return error_response(f"Import failed: {error}", 500)
 
-    def do_POST(self) -> None:
-        parsed = urlparse(self.path)
-        if parsed.path == "/api/agent/chat":
-            try:
-                payload = self.read_json_body()
-                message = str(payload.get("message", "")).strip()
-                thread_id = str(payload.get("thread_id", "default")).strip() or "default"
-                if not message:
-                    raise ValueError("Message cannot be empty.")
-                self.send_json(chat_with_agent(message, thread_id))
-            except ValueError as error:
-                self.send_json({"error": str(error)}, 400)
-            except Exception as error:
-                self.send_json({"error": f"Agent request failed: {error}"}, 500)
-            return
-        action_match = re.fullmatch(r"/api/agent/actions/(\d+)/(approve|reject)", parsed.path)
-        if action_match:
-            try:
-                action_id = int(action_match.group(1))
-                operation = action_match.group(2)
-                result = approve_action(action_id) if operation == "approve" else reject_action(action_id)
-                self.send_json(result)
-            except ValueError as error:
-                self.send_json({"error": str(error)}, 400)
-            return
-        if parsed.path != "/api/upload":
-            self.send_json({"error": "Not found"}, 404)
-            return
-        try:
-            content_length = int(self.headers.get("Content-Length", "0"))
-            if not content_length or content_length > MAX_UPLOAD_BYTES:
-                raise ValueError("Upload must be between 1 byte and 20 MB.")
-            content_type = self.headers.get("Content-Type", "")
-            if "multipart/form-data" not in content_type:
-                raise ValueError("Expected a multipart file upload.")
-            body = self.rfile.read(content_length)
-            message = BytesParser(policy=default).parsebytes(
-                f"Content-Type: {content_type}\r\nMIME-Version: 1.0\r\n\r\n".encode() + body
-            )
-            results = []
-            for part in message.iter_attachments():
-                filename = Path(part.get_filename() or "statement.csv").name
-                if not filename.lower().endswith(".csv"):
-                    raise ValueError(f"{filename}: only CSV statements are supported.")
-                results.append(import_statement(part.get_payload(decode=True), filename))
-            if not results:
-                raise ValueError("No CSV file was attached.")
-            added = sum(result["added"] for result in results)
-            forecast_retrained = False
-            forecast_warning = ""
-            if added:
-                try:
-                    train_forecast_model(force=True)
-                    forecast_retrained = True
-                except Exception as error:
-                    forecast_warning = str(error)
-            self.send_json({
-                "results": results,
-                "history": import_history(),
-                "intelligence_stale": added > 0,
-                "forecast_retrained": forecast_retrained,
-                "forecast_warning": forecast_warning,
-            })
-        except (ValueError, csv.Error) as error:
-            self.send_json({"error": str(error)}, 400)
-        except Exception as error:
-            self.send_json({"error": f"Import failed: {error}"}, 500)
 
-    def read_json_body(self) -> dict:
-        content_length = int(self.headers.get("Content-Length", "0"))
-        if not content_length or content_length > 1_000_000:
-            raise ValueError("Invalid request size.")
-        try:
-            return json.loads(self.rfile.read(content_length))
-        except json.JSONDecodeError as error:
-            raise ValueError("Invalid JSON request.") from error
+@app.get("/")
+def get_index():
+    return RedirectResponse("/index.html")
+
+
+if not IS_VERCEL:
+    app.mount("/", StaticFiles(directory=STATIC_DIR), name="static")
 
 
 def run(host: str = "127.0.0.1", port: int = 8000) -> None:
-    server = ThreadingHTTPServer((host, port), DashboardHandler)
-    count = len(load_transactions())
-    print(f"Expense dashboard running at http://{host}:{port}")
-    print(f"SQLite database: {DATABASE.name} · {count:,} transactions")
-    try:
-        server.serve_forever()
-    except KeyboardInterrupt:
-        print("\nDashboard stopped.")
-    finally:
-        server.server_close()
+    uvicorn.run(app, host=host, port=port)
 
-
-initialize_database()
-initialize_pipeline()
-initialize_forecasting()
-bootstrap_existing_statements()
 
 if __name__ == "__main__":
     run()

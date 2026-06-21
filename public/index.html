@@ -15,16 +15,17 @@
   <header class="topbar">
     <a class="brand" href="#"><span class="brand-mark">A</span><span>expense intelligence</span></a>
     <div class="header-actions">
-      <span class="secure-pill"><i></i> Local & private</span>
+      <span class="secure-pill"><i></i> <span id="accountName">Private account</span></span>
       <button class="upload-trigger" id="openUpload">＋ Import statement</button>
       <button class="icon-button" id="refreshButton" aria-label="Refresh dashboard">↻</button>
+      <button class="logout-button" id="logoutButton">Log out</button>
     </div>
   </header>
 
   <main>
     <section class="hero">
       <div>
-        <p class="eyebrow">FINANCIAL FIELD NOTES / 2025–26</p>
+        <p class="eyebrow" id="userGreeting">YOUR FINANCIAL FIELD NOTES</p>
         <h1>Your money,<br><em>made legible.</em></h1>
         <p class="hero-copy">A clear account of where it went, what repeats, and what deserves a closer look.</p>
       </div>

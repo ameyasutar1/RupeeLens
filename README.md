@@ -19,7 +19,28 @@ python app.py
 
 Open `http://127.0.0.1:8000`.
 
+The backend is served by FastAPI and Uvicorn. Interactive API documentation is
+available locally at `http://127.0.0.1:8000/docs`.
+
 On first run, supported statement CSV files already in the folder are imported into the local `expenses.db`.
+
+## Test suite
+
+Run the isolated comprehensive regression suite with:
+
+```bash
+python test.py
+```
+
+`test.py` creates temporary per-user databases and never opens the real ledger. It covers
+authentication, sessions, rate limiting, cross-user isolation, statement parsing, duplicate
+imports, every dashboard filter, upload validation, deterministic analytics, SQL safety,
+transaction approvals, adaptive classification rules, chat continuation/history, savings
+calculations, a real XGBoost training and 7/30-day forecast cycle, frontend JavaScript syntax,
+deployment files, and the repository privacy scan.
+
+Gemini and Vercel Blob network calls are intentionally replaced by deterministic local
+boundaries; those external services require separate deployment smoke tests.
 
 Use **Import statement** or the dashboard drop zone whenever you download a new CSV. The import process:
 
@@ -48,6 +69,44 @@ python scripts/privacy_check.py
 ```
 
 Never force-add an ignored financial or secret file.
+
+## Deploy to Vercel
+
+Vercel automatically detects the top-level FastAPI `app` in `app.py`. The repository
+also includes `vercel.json` and `.python-version`.
+
+1. Import the GitHub repository in Vercel and keep the **FastAPI** preset.
+2. Keep the root directory as `./`.
+3. Create a **private Vercel Blob** store for persistent database snapshots.
+4. Add these Environment Variables in Vercel:
+
+   - `GEMINI_API_KEY`
+   - `BLOB_READ_WRITE_TOKEN` — automatically available when the Blob store is connected
+   - `RUPEELENS_BLOB_PREFIX=rupeelens`
+   - `RUPEELENS_USERNAME=rupeelens` — optional first-account bootstrap
+   - `RUPEELENS_PASSWORD` — optional bootstrap password, at least 12 characters
+   - `RUPEELENS_SIGNUP_CODE` — required to create accounts through the deployed login page
+
+5. Deploy.
+
+On Vercel, the application restores the private SQLite snapshot from Blob into its
+writable `/tmp` directory on cold start. Mutating operations checkpoint and upload
+the database before returning. Without `BLOB_READ_WRITE_TOKEN`, the application still
+starts, but uploaded data is temporary and may disappear when the function instance
+is recycled.
+
+Check deployment storage status at `/api/runtime`.
+
+The application uses scrypt password hashing and revocable random session tokens stored in
+`HttpOnly`, `SameSite=Strict`, secure cookies on Vercel. Failed logins are rate-limited.
+Every account receives a separate SQLite ledger, forecast model, chat history, adaptive
+rules, and private Blob snapshot, so one user cannot query or render another user's data.
+
+For an existing single-user installation, the first account automatically adopts the legacy
+`expenses.db` and model artifacts. Additional accounts begin with an empty private workspace.
+
+This snapshot design is intended for a private, single-user personal dashboard. It is
+not a concurrent multi-tenant database architecture.
 
 ## Artha AI agent
 
@@ -79,6 +138,13 @@ The dashboard is intentionally split into five backend stages:
 Categories, colors, display order, and financial roles are stored in `category_config`; the frontend reads them from the API rather than maintaining a fixed list.
 
 If you explicitly ask Artha to remember a category for a merchant, the proposed change still requires approval. Approval updates the transaction and creates a reusable `user_approved` classification rule for future imports.
+
+Artha can also inspect repeated merchants that remain in **Other** and propose reusable
+classification rules. The model cannot activate a rule directly: each proposal shows the
+target category, match pattern, sample transactions, and affected row count in the dashboard.
+After approval, the rule is stored as `llm_approved`, matching historical **Other** expenses
+can be backfilled, and every application is recorded in `rule_application_audit`. New CSV
+imports then use the learned rule automatically.
 
 ## XGBoost spending forecast
 

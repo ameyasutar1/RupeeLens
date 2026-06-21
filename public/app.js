@@ -4,6 +4,25 @@ let forecastTimer;
 let agentThreadId = localStorage.getItem("arthaThreadId") || crypto.randomUUID();
 localStorage.setItem("arthaThreadId", agentThreadId);
 
+async function loadAccount() {
+  const response = await fetch("/api/auth/me");
+  if (response.status === 401) {
+    window.location.replace("/login.html");
+    return false;
+  }
+  const payload = await response.json();
+  document.querySelector("#accountName").textContent = payload.user.display_name;
+  document.querySelector("#userGreeting").textContent =
+    `${payload.user.display_name.toUpperCase()}'S FINANCIAL FIELD NOTES`;
+  return true;
+}
+
+async function logout() {
+  await fetch("/api/auth/logout", { method: "POST" });
+  localStorage.removeItem("arthaThreadId");
+  window.location.replace("/login.html");
+}
+
 const escapeHtml = value => String(value).replace(/[&<>"']/g, character => ({
   "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#039;",
 }[character]));
@@ -373,7 +392,7 @@ async function sendAgentMessage(message) {
     if (!response.ok) throw new Error(payload.error || "Agent request failed");
     document.querySelector("#agentThinking")?.remove();
     addChatMessage("assistant", payload.message);
-    renderPendingActions(payload.actions);
+    renderPendingActions(payload.actions, payload.rule_actions);
   } catch (error) {
     document.querySelector("#agentThinking")?.remove();
     addChatMessage("assistant", `I hit a problem: ${error.message}`);
@@ -385,17 +404,19 @@ async function sendAgentMessage(message) {
 
 async function loadAgentSession() {
   try {
-    const [messagesResponse, actionsResponse] = await Promise.all([
+    const [messagesResponse, actionsResponse, rulesResponse] = await Promise.all([
       fetch(`/api/agent/messages?thread_id=${encodeURIComponent(agentThreadId)}`),
       fetch("/api/agent/actions"),
+      fetch("/api/agent/rules"),
     ]);
     const messages = await messagesResponse.json();
     const actions = await actionsResponse.json();
+    const rules = await rulesResponse.json();
     if (messages.length) {
       document.querySelector("#chatMessages").innerHTML = "";
       messages.forEach(item => addChatMessage(item.role, item.content));
     }
-    renderPendingActions(actions);
+    renderPendingActions(actions, rules);
   } catch {
     // The dashboard remains fully usable without the agent panel.
   }
@@ -585,9 +606,11 @@ function bindPromptStarters() {
   });
 }
 
-function renderPendingActions(actions) {
+function renderPendingActions(actions = [], rules = []) {
+  actions = actions || [];
+  rules = rules || [];
   const container = document.querySelector("#pendingActions");
-  container.innerHTML = actions.map(action => {
+  const transactionCards = actions.map(action => {
     const changes = Object.entries(action.proposed_changes)
       .map(([field, value]) => field === "_remember_for_future"
         ? "remember this merchant for future imports"
@@ -606,9 +629,35 @@ function renderPendingActions(actions) {
           <button class="approve" data-action="${action.id}" data-decision="approve">Approve edit</button>
         </div>
       </article>`;
-  }).join("");
-  container.querySelectorAll("button").forEach(button => {
+  });
+  const ruleCards = rules.map(rule => {
+    const samples = rule.sample_transactions.slice(0, 3)
+      .map(item => `${escapeHtml(item.merchant)} · ${money(item.amount)} · ${shortDate(item.transaction_date)}`)
+      .join("<br>");
+    return `
+      <article class="action-card rule-action-card">
+        <div>
+          <span>Rule learning approval · proposal ${rule.id}</span>
+          <strong>${escapeHtml(rule.pattern)} → ${escapeHtml(rule.category)}</strong>
+          <p>${escapeHtml(rule.reason)}</p>
+          <div class="action-changes">
+            Match ${escapeHtml(rule.match_field)} · ${rule.affected_count} existing Other transaction${rule.affected_count === 1 ? "" : "s"}
+            ${rule.apply_to_existing ? " will be reclassified" : " will remain unchanged"}
+          </div>
+          <div class="rule-samples">${samples}</div>
+        </div>
+        <div class="action-buttons">
+          <button data-rule="${rule.id}" data-decision="reject">Reject</button>
+          <button class="approve" data-rule="${rule.id}" data-decision="approve">Teach Artha</button>
+        </div>
+      </article>`;
+  });
+  container.innerHTML = [...ruleCards, ...transactionCards].join("");
+  container.querySelectorAll("button[data-action]").forEach(button => {
     button.addEventListener("click", () => resolveAgentAction(button.dataset.action, button.dataset.decision));
+  });
+  container.querySelectorAll("button[data-rule]").forEach(button => {
+    button.addEventListener("click", () => resolveRuleProposal(button.dataset.rule, button.dataset.decision));
   });
 }
 
@@ -618,8 +667,7 @@ async function resolveAgentAction(actionId, decision) {
     const payload = await response.json();
     if (!response.ok) throw new Error(payload.error);
     showToast(decision === "approve" ? "Ledger correction approved and audited." : "Proposed change rejected.");
-    const actionsResponse = await fetch("/api/agent/actions");
-    renderPendingActions(await actionsResponse.json());
+    await refreshPendingApprovals();
     if (decision === "approve") await loadDashboard();
     if (decision === "approve") await loadIntelligence();
   } catch (error) {
@@ -627,9 +675,39 @@ async function resolveAgentAction(actionId, decision) {
   }
 }
 
+async function refreshPendingApprovals() {
+  const [actionsResponse, rulesResponse] = await Promise.all([
+    fetch("/api/agent/actions"),
+    fetch("/api/agent/rules"),
+  ]);
+  renderPendingActions(await actionsResponse.json(), await rulesResponse.json());
+}
+
+async function resolveRuleProposal(proposalId, decision) {
+  try {
+    const response = await fetch(`/api/agent/rules/${proposalId}/${decision}`, { method: "POST" });
+    const payload = await response.json();
+    if (!response.ok) throw new Error(payload.error);
+    showToast(
+      decision === "approve"
+        ? `Artha learned the rule and reclassified ${payload.rows_reclassified} transaction${payload.rows_reclassified === 1 ? "" : "s"}.`
+        : "Classification rule proposal rejected."
+    );
+    await refreshPendingApprovals();
+    if (decision === "approve") {
+      await loadDashboard();
+      await loadIntelligence(true);
+      await loadForecast();
+    }
+  } catch (error) {
+    showToast(error.message || "Could not resolve the rule proposal.", true);
+  }
+}
+
 document.querySelector("#applyFilters").addEventListener("click", loadDashboard);
 document.querySelector("#resetFilters").addEventListener("click", resetFilters);
 document.querySelector("#refreshButton").addEventListener("click", loadDashboard);
+document.querySelector("#logoutButton").addEventListener("click", logout);
 document.querySelector("#openUpload").addEventListener("click", () => {
   document.querySelector("#uploadPanel").scrollIntoView({ behavior: "smooth", block: "center" });
   setTimeout(() => document.querySelector("#statementFiles").click(), 450);
@@ -687,7 +765,14 @@ document.querySelector("#clearChat").addEventListener("click", () => {
   addChatMessage("assistant", "Fresh page. What would you like to understand?");
 });
 
-loadDashboard();
-loadAgentSession();
-loadIntelligence();
-loadForecast(7);
+async function startDashboard() {
+  if (!await loadAccount()) return;
+  await Promise.all([
+    loadDashboard(),
+    loadAgentSession(),
+    loadIntelligence(),
+    loadForecast(7),
+  ]);
+}
+
+startDashboard();

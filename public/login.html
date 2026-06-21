@@ -1,0 +1,55 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#173f35">
+  <title>Sign in · RupeeLens</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=DM+Mono:wght@400;500&family=Manrope:wght@400;500;600;700&family=Playfair+Display:ital,wght@0,600;1,600&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="/styles.css">
+</head>
+<body class="auth-page">
+  <div class="noise"></div>
+  <main class="auth-shell">
+    <section class="auth-story">
+      <div>
+        <a class="brand" href="/login.html"><span class="brand-mark">R</span><span>RupeeLens</span></a>
+        <h1>Your money,<br><em>your account.</em></h1>
+        <p>Each user receives an isolated ledger, model, chat history, learned rules, and financial narrative.</p>
+      </div>
+      <div class="auth-security">
+        <span>Scrypt password hashing</span>
+        <span>HTTP-only revocable sessions</span>
+        <span>Private per-user SQLite storage</span>
+      </div>
+    </section>
+    <section class="auth-panel">
+      <span class="kicker">PRIVATE FINANCIAL WORKSPACE</span>
+      <h2>Welcome back.</h2>
+      <p>Sign in to your personal dashboard. Your financial data is never mixed with another account.</p>
+      <div class="auth-tabs">
+        <button class="active" id="loginTab">Sign in</button>
+        <button id="registerTab">Create account</button>
+      </div>
+      <form class="auth-form" id="loginForm">
+        <label><span>Username</span><input name="username" autocomplete="username" required></label>
+        <label><span>Password</span><input name="password" type="password" autocomplete="current-password" required></label>
+        <div class="auth-error" id="loginError"></div>
+        <button type="submit">Open my dashboard</button>
+      </form>
+      <form class="auth-form" id="registerForm" hidden>
+        <label><span>Display name</span><input name="display_name" autocomplete="name" maxlength="80" required></label>
+        <label><span>Username</span><input name="username" autocomplete="username" minlength="3" maxlength="64" required></label>
+        <label><span>Password</span><input name="password" type="password" autocomplete="new-password" minlength="12" required></label>
+        <label id="signupCodeField" hidden><span>Signup code</span><input name="signup_code" type="password" autocomplete="one-time-code"></label>
+        <div class="auth-error" id="registerError"></div>
+        <button type="submit">Create private workspace</button>
+      </form>
+      <p class="auth-note">Sessions use secure HTTP-only cookies. On Vercel, set a signup code before allowing additional accounts.</p>
+    </section>
+  </main>
+  <script src="/login.js"></script>
+</body>
+</html>

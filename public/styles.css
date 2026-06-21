@@ -46,6 +46,30 @@ button { cursor: pointer; }
 .secure-pill i { display: inline-block; width: 6px; height: 6px; border-radius: 50%; background: #38a76a; margin-right: 6px; }
 .icon-button { width: 34px; height: 34px; border: 1px solid var(--line); border-radius: 50%; background: transparent; font-size: 18px; }
 .upload-trigger { border: 0; background: var(--green); color: white; padding: 9px 14px; font-size: 11px; font-weight: 700; }
+.logout-button { border: 1px solid var(--line); background: transparent; padding: 8px 11px; font-size: 10px; }
+
+.auth-page { min-height: 100vh; display: grid; place-items: center; padding: 30px; }
+.auth-shell { width: min(980px, 100%); display: grid; grid-template-columns: 1fr 1fr; min-height: 610px; border: 1px solid var(--line); background: var(--cream); box-shadow: 0 25px 90px rgba(23,32,27,.12); }
+.auth-story { padding: 55px; color: white; background: var(--green); display: flex; flex-direction: column; justify-content: space-between; }
+.auth-story h1 { font-size: clamp(52px, 7vw, 82px); margin: 30px 0; }
+.auth-story h1 em { color: var(--lime); }
+.auth-story p { max-width: 420px; color: rgba(255,255,255,.65); line-height: 1.75; font-size: 13px; }
+.auth-security { display: grid; gap: 10px; font: 9px "DM Mono"; color: rgba(255,255,255,.62); text-transform: uppercase; letter-spacing: .08em; }
+.auth-security span::before { content: "✓"; margin-right: 9px; color: var(--lime); }
+.auth-panel { padding: 55px; display: flex; flex-direction: column; justify-content: center; }
+.auth-panel h2 { margin: 10px 0 8px; font: 38px "Playfair Display"; }
+.auth-panel > p { margin: 0 0 28px; color: var(--muted); font-size: 12px; line-height: 1.6; }
+.auth-tabs { display: grid; grid-template-columns: 1fr 1fr; margin-bottom: 25px; border-bottom: 1px solid var(--line); }
+.auth-tabs button { border: 0; background: transparent; padding: 12px; color: var(--muted); font: 10px "DM Mono"; text-transform: uppercase; }
+.auth-tabs button.active { color: var(--ink); border-bottom: 2px solid var(--green); }
+.auth-form { display: grid; gap: 14px; }
+.auth-form[hidden] { display: none; }
+.auth-form label span { display: block; margin-bottom: 6px; color: var(--muted); font: 9px "DM Mono"; text-transform: uppercase; }
+.auth-form input { width: 100%; border: 1px solid var(--line); background: white; padding: 12px 13px; outline: 0; }
+.auth-form input:focus { border-color: var(--green); box-shadow: 0 0 0 3px rgba(23,63,53,.08); }
+.auth-form button { border: 0; padding: 13px; color: white; background: var(--green); font-weight: 700; }
+.auth-error { min-height: 18px; color: #9e3028; font-size: 10px; line-height: 1.5; }
+.auth-note { margin-top: 18px; color: var(--muted); font-size: 9px; line-height: 1.6; }
 
 main { width: min(1440px, 90vw); margin: 0 auto; }
 .hero {
@@ -196,6 +220,9 @@ h1 em { color: var(--green); }
 .action-buttons { display: flex; align-items: center; gap: 7px; }
 .action-buttons button { border: 1px solid var(--ink); background: transparent; padding: 8px 10px; font-size: 9px; }
 .action-buttons .approve { color: white; background: var(--green); }
+.rule-action-card { border-color: #76a88e; background: #eff8f2; }
+.rule-action-card > div > span { color: var(--green); }
+.rule-samples { margin-top: 8px; color: var(--muted); font: 9px/1.6 "DM Mono"; }
 .chat-composer { display: grid; grid-template-columns: 1fr auto; gap: 10px; margin: 8px 24px 0; padding: 8px; border: 1px solid var(--ink); background: white; }
 .chat-composer textarea { resize: none; max-height: 130px; border: 0; outline: 0; padding: 9px; font-size: 12px; line-height: 1.45; }
 .chat-composer button { align-self: end; width: 37px; height: 37px; border: 0; border-radius: 50%; color: var(--ink); background: var(--lime); font-size: 20px; }
@@ -308,6 +335,8 @@ footer { width: 90vw; max-width: 1440px; margin: 0 auto; border-top: 1px solid v
 .loading { cursor: progress; }
 
 @media (max-width: 900px) {
+  .auth-shell { grid-template-columns: 1fr; }
+  .auth-story { min-height: 380px; }
   .hero { display: block; min-height: 0; }
   .period-card { margin-top: 40px; }
   .ingestion-panel { grid-template-columns: 1fr; }
@@ -327,6 +356,9 @@ footer { width: 90vw; max-width: 1440px; margin: 0 auto; border-top: 1px solid v
 }
 
 @media (max-width: 560px) {
+  .auth-page { padding: 12px; }
+  .auth-story, .auth-panel { padding: 32px 25px; }
+  .logout-button { padding: 7px 8px; }
   main { width: 94vw; }
   .topbar { padding: 0 3vw; }
   .secure-pill { display: none; }

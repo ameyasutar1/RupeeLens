@@ -9,7 +9,6 @@ import sqlite3
 import statistics
 from calendar import monthrange
 from datetime import date, datetime
-from pathlib import Path
 from threading import Lock
 from typing import Literal
 
@@ -21,12 +20,17 @@ from pydantic import BaseModel, Field
 
 from analytics_pipeline import categories_by_type, category_metadata, operating_categories
 from forecast_model import forecast_spending
+from runtime_config import ENV_FILE, current_user_id, database_path
 
-ROOT = Path(__file__).resolve().parent
-DATABASE = ROOT / "expenses.db"
-ENV_FILE = ROOT / ".env"
 MODEL_NAME = "gemini-2.5-flash"
 EDITABLE_FIELDS = {"category", "merchant", "notes", "user_label"}
+RULE_MATCH_FIELDS = {"merchant", "description"}
+BLOCKED_RULE_PATTERNS = {
+    "UPI", "POS", "ECOM", "PAYMENT", "PURCHASE", "BANK", "TRANSFER",
+    "DEBIT", "CREDIT", "ONLINE", "INDIA", "PVT", "LTD", "PRIVATE",
+    "CAFE", "FOOD", "STORE", "SHOP", "MARKET", "SERVICE", "SERVICES",
+    "ENTERPRISE", "ENTERPRISES",
+}
 AGENT_LOCK = Lock()
 AGENT = None
 ACTIVE_THREADS: set[str] = set()
@@ -44,10 +48,11 @@ def load_local_environment() -> None:
 
 
 def connect(read_only: bool = False) -> sqlite3.Connection:
+    database = database_path()
     if read_only:
-        connection = sqlite3.connect(f"file:{DATABASE}?mode=ro", uri=True, timeout=30)
+        connection = sqlite3.connect(f"file:{database}?mode=ro", uri=True, timeout=30)
     else:
-        connection = sqlite3.connect(DATABASE, timeout=30)
+        connection = sqlite3.connect(database, timeout=30)
     connection.row_factory = sqlite3.Row
     connection.execute("PRAGMA busy_timeout = 30000")
     return connection
@@ -118,6 +123,27 @@ class ForecastInput(BaseModel):
     horizon_days: int = Field(
         default=7, ge=7, le=30,
         description="Prediction window from 7 to 30 days.",
+    )
+
+
+class RuleOpportunityInput(BaseModel):
+    minimum_occurrences: int = Field(
+        default=2, ge=1, le=20,
+        description="Minimum number of Other transactions for a merchant to be listed.",
+    )
+    limit: int = Field(default=15, ge=1, le=30)
+
+
+class ProposedClassificationRule(BaseModel):
+    category: str = Field(description="Existing target category.")
+    pattern: str = Field(
+        description="Narrow merchant or description fragment that reliably identifies the expense."
+    )
+    match_field: Literal["merchant", "description"] = Field(default="merchant")
+    reason: str = Field(description="Evidence-based explanation for this classification.")
+    apply_to_existing: bool = Field(
+        default=True,
+        description="Reclassify currently uncategorized matching expenses after approval.",
     )
 
 
@@ -422,6 +448,154 @@ def run_read_only_sql(query: str) -> str:
         return f"SQL error: {error}"
 
 
+@tool(args_schema=RuleOpportunityInput)
+def classification_opportunities(
+    minimum_occurrences: int = 2,
+    limit: int = 15,
+) -> str:
+    """Find repeated merchants still classified as Other, with examples for rule discovery."""
+    with connect(read_only=True) as connection:
+        rows = connection.execute("""
+            SELECT merchant, COUNT(*) AS transactions, ROUND(SUM(amount), 2) AS total,
+                   ROUND(AVG(amount), 2) AS average, MIN(transaction_date) AS first_seen,
+                   MAX(transaction_date) AS last_seen
+            FROM transactions
+            WHERE direction='expense' AND category='Other'
+            GROUP BY merchant
+            HAVING COUNT(*) >= ?
+            ORDER BY transactions DESC, total DESC
+            LIMIT ?
+        """, (minimum_occurrences, limit)).fetchall()
+        opportunities = []
+        for row in rows:
+            samples = connection.execute("""
+                SELECT id, transaction_date, merchant, amount, description
+                FROM transactions
+                WHERE direction='expense' AND category='Other' AND merchant=?
+                ORDER BY transaction_date DESC, id DESC
+                LIMIT 5
+            """, (row["merchant"],)).fetchall()
+            opportunities.append({
+                **dict(row),
+                "samples": [dict(sample) for sample in samples],
+            })
+    return json.dumps({
+        "opportunities": opportunities,
+        "instruction": (
+            "Inspect evidence before proposing a rule. Prefer a distinctive merchant pattern; "
+            "do not infer a category from a vague payment-channel token."
+        ),
+    }, ensure_ascii=False)
+
+
+def normalize_rule_pattern(pattern: str) -> str:
+    return re.sub(r"\s+", " ", pattern.strip().upper())
+
+
+def validate_rule_pattern(pattern: str) -> str | None:
+    if len(pattern) < 3:
+        return "Pattern must contain at least 3 characters."
+    if len(pattern) > 100:
+        return "Pattern must be 100 characters or fewer."
+    words = set(re.findall(r"[A-Z0-9]+", pattern))
+    if pattern in BLOCKED_RULE_PATTERNS or words and words.issubset(BLOCKED_RULE_PATTERNS):
+        return "Pattern is too generic and could misclassify unrelated transactions."
+    if not re.search(r"[A-Z]", pattern):
+        return "Pattern must include a recognizable merchant or description name."
+    return None
+
+
+@tool(args_schema=ProposedClassificationRule)
+def propose_classification_rule(
+    category: str,
+    pattern: str,
+    reason: str,
+    match_field: Literal["merchant", "description"] = "merchant",
+    apply_to_existing: bool = True,
+) -> str:
+    """Propose a reusable classification rule for approval; no active rule is created yet."""
+    allowed_categories = [item["name"] for item in category_metadata()]
+    if category not in allowed_categories or category in {"Income", "Other"}:
+        return f"Error: category must be one of {', '.join(allowed_categories)} except Income or Other."
+    if not reason.strip():
+        return "Error: an evidence-based reason is required."
+    normalized_pattern = normalize_rule_pattern(pattern)
+    pattern_error = validate_rule_pattern(normalized_pattern)
+    if pattern_error:
+        return f"Error: {pattern_error}"
+    if match_field not in RULE_MATCH_FIELDS:
+        return "Error: match_field must be merchant or description."
+    escaped_pattern = (
+        normalized_pattern.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+    )
+    field = f'UPPER("{match_field}")'
+    with connect() as connection:
+        existing_rule = connection.execute("""
+            SELECT id, category, active FROM classification_rules
+            WHERE pattern=? AND match_field=?
+        """, (normalized_pattern, match_field)).fetchone()
+        if existing_rule:
+            return json.dumps({
+                "error": "A classification rule already uses this pattern and field.",
+                "existing_rule": dict(existing_rule),
+            })
+        duplicate = connection.execute("""
+            SELECT id, category FROM classification_rule_proposals
+            WHERE pattern=? AND match_field=? AND status='pending'
+        """, (normalized_pattern, match_field)).fetchone()
+        if duplicate and duplicate["category"] != category:
+            return json.dumps({
+                "error": "A pending proposal already assigns this pattern to another category.",
+                "existing_proposal_id": duplicate["id"],
+                "existing_category": duplicate["category"],
+            })
+        samples = connection.execute(f"""
+            SELECT id, transaction_date, merchant, amount, category, description
+            FROM transactions
+            WHERE direction='expense' AND category='Other'
+              AND {field} LIKE ? ESCAPE '\\'
+            ORDER BY transaction_date DESC, id DESC
+            LIMIT 10
+        """, (f"%{escaped_pattern}%",)).fetchall()
+        affected_count = connection.execute(f"""
+            SELECT COUNT(*) AS count
+            FROM transactions
+            WHERE direction='expense' AND category='Other'
+              AND {field} LIKE ? ESCAPE '\\'
+        """, (f"%{escaped_pattern}%",)).fetchone()["count"]
+        if not affected_count:
+            return "Error: this pattern matches no current expense classified as Other."
+        if duplicate:
+            proposal_id = duplicate["id"]
+        else:
+            cursor = connection.execute("""
+                INSERT INTO classification_rule_proposals (
+                    category, pattern, match_field, priority, reason,
+                    apply_to_existing, affected_count, sample_transactions,
+                    status, created_at
+                ) VALUES (?, ?, ?, 5, ?, ?, ?, ?, 'pending', ?)
+            """, (
+                category, normalized_pattern, match_field, reason.strip(),
+                int(apply_to_existing), affected_count,
+                json.dumps([dict(row) for row in samples], ensure_ascii=False),
+                datetime.now().isoformat(timespec="seconds"),
+            ))
+            proposal_id = cursor.lastrowid
+    return json.dumps({
+        "status": "pending_user_approval",
+        "proposal_id": proposal_id,
+        "category": category,
+        "pattern": normalized_pattern,
+        "match_field": match_field,
+        "affected_count": affected_count,
+        "sample_transactions": [dict(row) for row in samples],
+        "message": (
+            "No rule or transaction was changed. Ask the user to review and approve "
+            "the learning proposal in the dashboard."
+        ),
+    }, ensure_ascii=False)
+
+
 @tool(args_schema=ProposedEdit)
 def propose_transaction_edit(
     transaction_id: int,
@@ -556,8 +730,10 @@ TOOLS = [
     financial_summary,
     current_spending_baseline,
     run_read_only_sql,
+    classification_opportunities,
     build_savings_plan,
     propose_transaction_edit,
+    propose_classification_rule,
 ]
 
 SYSTEM_PROMPT = """
@@ -606,8 +782,15 @@ Tool discipline:
 - To correct an expense, first identify the exact transaction, then call propose_transaction_edit.
 - Set remember_for_future=true only when the user explicitly says this merchant should always use that category.
 - A proposed edit requires explicit user approval in the dashboard before it is committed.
+- When the user asks you to improve, learn, clean up, or scale classification, call
+  classification_opportunities, inspect transaction examples, and propose narrow reusable rules
+  with propose_classification_rule.
+- Never infer a category from generic tokens such as UPI, POS, payment, bank, transfer, debit,
+  online, private, or limited. Prefer distinctive merchant names supported by repeated examples.
+- Never activate or apply a learned rule yourself. Every learned rule requires dashboard approval.
+- Explain how many existing Other transactions the proposed rule would affect.
 - The SQL connection is physically read-only. Never attempt write SQL; transaction corrections
-  must still use propose_transaction_edit and require user approval.
+  and learned rules must use their proposal tools and require user approval.
 
 When the user's reference is ambiguous (for example, multiple matching Swiggy payments),
 show the likely matches and ask which transaction they mean instead of guessing.
@@ -645,7 +828,13 @@ def save_message(thread_id: str, role: Literal["user", "assistant"], content: st
         """, (thread_id, role, content, datetime.now().isoformat(timespec="seconds")))
 
 
+def scoped_thread_id(thread_id: str) -> str:
+    prefix = f"{current_user_id()}:"
+    return thread_id if thread_id.startswith(prefix) else f"{prefix}{thread_id}"
+
+
 def list_chat_messages(thread_id: str, limit: int = 50) -> list[dict]:
+    thread_id = scoped_thread_id(thread_id)
     with connect(read_only=True) as connection:
         rows = connection.execute("""
             SELECT role, content, created_at FROM (
@@ -678,6 +867,7 @@ def response_looks_incomplete(text: str) -> bool:
 
 
 def chat_with_agent(message: str, thread_id: str) -> dict:
+    thread_id = scoped_thread_id(thread_id)
     save_message(thread_id, "user", message)
     if thread_id in ACTIVE_THREADS:
         input_messages = [{"role": "user", "content": message}]
@@ -735,6 +925,7 @@ def chat_with_agent(message: str, thread_id: str) -> dict:
             "continuations": continuation_count,
         },
         "actions": list_pending_actions(),
+        "rule_actions": list_pending_rule_proposals(),
     }
 
 
@@ -809,3 +1000,110 @@ def reject_action(action_id: int) -> dict:
         if not cursor.rowcount:
             raise ValueError("Pending action not found.")
     return {"status": "rejected", "action_id": action_id}
+
+
+def list_pending_rule_proposals() -> list[dict]:
+    with connect(read_only=True) as connection:
+        rows = connection.execute("""
+            SELECT id, category, pattern, match_field, priority, reason,
+                   apply_to_existing, affected_count, sample_transactions,
+                   status, created_at
+            FROM classification_rule_proposals
+            WHERE status='pending'
+            ORDER BY id DESC
+        """).fetchall()
+    proposals = []
+    for row in rows:
+        item = dict(row)
+        item["apply_to_existing"] = bool(item["apply_to_existing"])
+        item["sample_transactions"] = json.loads(item["sample_transactions"])
+        proposals.append(item)
+    return proposals
+
+
+def approve_rule_proposal(proposal_id: int) -> dict:
+    with connect() as connection:
+        proposal = connection.execute("""
+            SELECT * FROM classification_rule_proposals WHERE id=?
+        """, (proposal_id,)).fetchone()
+        if not proposal or proposal["status"] != "pending":
+            raise ValueError("Pending classification rule proposal not found.")
+        if proposal["match_field"] not in RULE_MATCH_FIELDS:
+            raise ValueError("Proposal contains an invalid match field.")
+        pattern_error = validate_rule_pattern(proposal["pattern"])
+        if pattern_error:
+            raise ValueError(pattern_error)
+        allowed_categories = [item["name"] for item in category_metadata()]
+        if proposal["category"] not in allowed_categories:
+            raise ValueError("Proposal contains an invalid category.")
+        conflicting_rule = connection.execute("""
+            SELECT id, category FROM classification_rules
+            WHERE pattern=? AND match_field=? AND active=1 AND category<>?
+        """, (
+            proposal["pattern"], proposal["match_field"], proposal["category"],
+        )).fetchone()
+        if conflicting_rule:
+            raise ValueError(
+                f"This pattern is already active for {conflicting_rule['category']}."
+            )
+        now = datetime.now().isoformat(timespec="seconds")
+        connection.execute("""
+            INSERT OR IGNORE INTO classification_rules (
+                category, pattern, match_field, priority, active, source, created_at
+            ) VALUES (?, ?, ?, ?, 1, 'llm_approved', ?)
+        """, (
+            proposal["category"], proposal["pattern"], proposal["match_field"],
+            proposal["priority"], now,
+        ))
+        rule = connection.execute("""
+            SELECT id FROM classification_rules
+            WHERE category=? AND pattern=? AND match_field=?
+        """, (
+            proposal["category"], proposal["pattern"], proposal["match_field"],
+        )).fetchone()
+        rows_reclassified = 0
+        if proposal["apply_to_existing"]:
+            escaped_pattern = (
+                proposal["pattern"].replace("\\", "\\\\")
+                .replace("%", "\\%").replace("_", "\\_")
+            )
+            field = f'UPPER("{proposal["match_field"]}")'
+            cursor = connection.execute(f"""
+                UPDATE transactions
+                SET category=?, updated_at=?
+                WHERE direction='expense' AND category='Other'
+                  AND {field} LIKE ? ESCAPE '\\'
+            """, (proposal["category"], now, f"%{escaped_pattern}%"))
+            rows_reclassified = cursor.rowcount
+        connection.execute("""
+            INSERT INTO rule_application_audit (
+                proposal_id, rule_id, category, pattern, match_field,
+                rows_reclassified, applied_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?)
+        """, (
+            proposal_id, rule["id"], proposal["category"], proposal["pattern"],
+            proposal["match_field"], rows_reclassified, now,
+        ))
+        connection.execute("""
+            UPDATE classification_rule_proposals
+            SET status='approved', resolved_at=?
+            WHERE id=?
+        """, (now, proposal_id))
+    return {
+        "status": "approved",
+        "proposal_id": proposal_id,
+        "rule_id": rule["id"],
+        "rows_reclassified": rows_reclassified,
+    }
+
+
+def reject_rule_proposal(proposal_id: int) -> dict:
+    with connect() as connection:
+        cursor = connection.execute("""
+            UPDATE classification_rule_proposals
+            SET status='rejected', resolved_at=?
+            WHERE id=? AND status='pending'
+        """, (datetime.now().isoformat(timespec="seconds"), proposal_id))
+        if not cursor.rowcount:
+            raise ValueError("Pending classification rule proposal not found.")
+    return {"status": "rejected", "proposal_id": proposal_id}

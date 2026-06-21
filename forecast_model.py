@@ -7,7 +7,6 @@ import math
 import sqlite3
 from collections import defaultdict
 from datetime import date, datetime, timedelta
-from pathlib import Path
 
 import joblib
 import numpy as np
@@ -16,29 +15,25 @@ from sklearn.model_selection import train_test_split
 from xgboost import XGBClassifier, XGBRegressor
 
 from analytics_pipeline import category_metadata, data_version, operating_categories
-
-
-ROOT = Path(__file__).resolve().parent
-DATABASE = ROOT / "expenses.db"
-ARTIFACT_DIR = ROOT / "artifacts"
-MODEL_PATH = ARTIFACT_DIR / "spending_forecast.joblib"
+from runtime_config import artifact_dir, database_path, model_path
 RANDOM_STATE = 42
 MIN_HISTORY_DAYS = 28
 MIN_CATEGORY_ACTIVE_DAYS = 12
 
 
 def connect(read_only: bool = False) -> sqlite3.Connection:
+    database = database_path()
     if read_only:
-        connection = sqlite3.connect(f"file:{DATABASE}?mode=ro", uri=True, timeout=30)
+        connection = sqlite3.connect(f"file:{database}?mode=ro", uri=True, timeout=30)
     else:
-        connection = sqlite3.connect(DATABASE, timeout=30)
+        connection = sqlite3.connect(database, timeout=30)
     connection.row_factory = sqlite3.Row
     connection.execute("PRAGMA busy_timeout = 30000")
     return connection
 
 
 def initialize_forecasting() -> None:
-    ARTIFACT_DIR.mkdir(exist_ok=True)
+    artifact_dir().mkdir(exist_ok=True)
     with connect() as connection:
         connection.execute("""
             CREATE TABLE IF NOT EXISTS forecast_model_runs (
@@ -185,8 +180,9 @@ def build_dataset() -> dict:
 def train_forecast_model(force: bool = False) -> dict:
     initialize_forecasting()
     version = data_version()
-    if MODEL_PATH.exists() and not force:
-        bundle = joblib.load(MODEL_PATH)
+    path = model_path()
+    if path.exists() and not force:
+        bundle = joblib.load(path)
         if bundle.get("data_version") == version:
             return bundle["metadata"]
 
@@ -272,8 +268,8 @@ def train_forecast_model(force: bool = False) -> dict:
         "outlier_limits": dataset["outlier_limits"],
         "metadata": metadata,
     }
-    ARTIFACT_DIR.mkdir(exist_ok=True)
-    joblib.dump(bundle, MODEL_PATH)
+    artifact_dir().mkdir(exist_ok=True)
+    joblib.dump(bundle, path)
     with connect() as connection:
         connection.execute("""
             INSERT INTO forecast_model_runs (
@@ -283,7 +279,7 @@ def train_forecast_model(force: bool = False) -> dict:
         """, (
             version, metadata["trained_at"], metadata["train_rows"],
             metadata["test_rows"], metadata["outliers_removed"],
-            json.dumps(metrics), json.dumps(importance), str(MODEL_PATH),
+            json.dumps(metrics), json.dumps(importance), str(path),
         ))
     return metadata
 
@@ -292,11 +288,12 @@ def forecast_spending(horizon: int = 7) -> dict:
     if not 7 <= horizon <= 30:
         raise ValueError("Forecast horizon must be between 7 and 30 days.")
     train_forecast_model()
-    bundle = joblib.load(MODEL_PATH)
+    path = model_path()
+    bundle = joblib.load(path)
     categories, dates, history = load_daily_history()
     if categories != bundle["categories"]:
         train_forecast_model(force=True)
-        bundle = joblib.load(MODEL_PATH)
+        bundle = joblib.load(path)
     event_model = bundle["event_model"]
     amount_model = bundle["amount_model"]
     start = dates[-1] + timedelta(days=1)

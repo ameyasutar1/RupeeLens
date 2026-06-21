@@ -10,16 +10,14 @@ import statistics
 from calendar import monthrange
 from collections import defaultdict
 from datetime import datetime
-from pathlib import Path
 from typing import Literal
 
 from langchain_google_genai import ChatGoogleGenerativeAI
 from pydantic import BaseModel, Field
 
+from runtime_config import ENV_FILE, database_path
 
-ROOT = Path(__file__).resolve().parent
-DATABASE = ROOT / "expenses.db"
-ENV_FILE = ROOT / ".env"
+
 MODEL_NAME = "gemini-2.5-flash"
 
 DEFAULT_CATEGORIES = [
@@ -75,10 +73,11 @@ DEFAULT_RULES = {
 
 
 def connect(read_only: bool = False) -> sqlite3.Connection:
+    database = database_path()
     if read_only:
-        connection = sqlite3.connect(f"file:{DATABASE}?mode=ro", uri=True, timeout=30)
+        connection = sqlite3.connect(f"file:{database}?mode=ro", uri=True, timeout=30)
     else:
-        connection = sqlite3.connect(DATABASE, timeout=30)
+        connection = sqlite3.connect(database, timeout=30)
     connection.row_factory = sqlite3.Row
     connection.execute("PRAGMA busy_timeout = 30000")
     return connection
@@ -105,6 +104,34 @@ def initialize_pipeline() -> None:
                 source TEXT NOT NULL DEFAULT 'system',
                 created_at TEXT NOT NULL,
                 UNIQUE(category, pattern, match_field)
+            );
+            CREATE TABLE IF NOT EXISTS classification_rule_proposals (
+                id INTEGER PRIMARY KEY,
+                category TEXT NOT NULL,
+                pattern TEXT NOT NULL,
+                match_field TEXT NOT NULL DEFAULT 'merchant',
+                priority INTEGER NOT NULL DEFAULT 5,
+                reason TEXT NOT NULL,
+                apply_to_existing INTEGER NOT NULL DEFAULT 1,
+                affected_count INTEGER NOT NULL DEFAULT 0,
+                sample_transactions TEXT NOT NULL DEFAULT '[]',
+                status TEXT NOT NULL DEFAULT 'pending',
+                created_at TEXT NOT NULL,
+                resolved_at TEXT
+            );
+            CREATE INDEX IF NOT EXISTS idx_rule_proposals_status
+            ON classification_rule_proposals(status, id);
+            CREATE TABLE IF NOT EXISTS rule_application_audit (
+                id INTEGER PRIMARY KEY,
+                proposal_id INTEGER NOT NULL,
+                rule_id INTEGER NOT NULL,
+                category TEXT NOT NULL,
+                pattern TEXT NOT NULL,
+                match_field TEXT NOT NULL,
+                rows_reclassified INTEGER NOT NULL DEFAULT 0,
+                applied_at TEXT NOT NULL,
+                FOREIGN KEY(proposal_id) REFERENCES classification_rule_proposals(id),
+                FOREIGN KEY(rule_id) REFERENCES classification_rules(id)
             );
             CREATE TABLE IF NOT EXISTS intelligence_snapshots (
                 id INTEGER PRIMARY KEY,
