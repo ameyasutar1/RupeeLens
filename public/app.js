@@ -485,7 +485,8 @@ async function loadForecast(horizon = 7) {
 function renderForecast(payload) {
   const top = payload.top_category;
   const metrics = payload.model.metrics;
-  const confidence = metrics.r2 > .35
+  const fallback = payload.model.runtime === "serverless_fallback";
+  const confidence = fallback ? "Baseline" : metrics.r2 > .35
     ? "Moderate" : metrics.r2 > 0 ? "Experimental" : "Low";
   document.querySelector("#forecastDaysTitle").textContent = payload.horizon_days;
   document.querySelector("#forecastTotal").textContent = money(payload.predicted_total, true);
@@ -497,12 +498,16 @@ function renderForecast(payload) {
     `${money(payload.uncertainty.lower_total, true)}–${money(payload.uncertainty.upper_total, true)} estimated range`;
   document.querySelector("#forecastConfidence").textContent = confidence;
   document.querySelector("#forecastMetric").textContent =
-    `R² ${metrics.r2} · MAE ${money(metrics.mae, true)}`;
+    fallback
+      ? `Historical MAE ${money(metrics.mae, true)}`
+      : `R² ${metrics.r2} · MAE ${money(metrics.mae, true)}`;
   document.querySelector("#forecastNarrative").textContent = top
     ? `The model expects ${top.category} to lead regular spending from ${shortDate(payload.forecast_start)} to ${shortDate(payload.forecast_end)}. This excludes rare categories and statistical outliers.`
     : "The model found insufficient repeatable spending patterns.";
   document.querySelector("#forecastTrainingNote").textContent =
-    `${payload.methodology.algorithm} · ${payload.model.train_rows.toLocaleString("en-IN")} train / ${payload.model.test_rows.toLocaleString("en-IN")} test rows`;
+    fallback
+      ? `${payload.methodology.algorithm} · ${payload.model.train_rows.toLocaleString("en-IN")} historical category-days`
+      : `${payload.methodology.algorithm} · ${payload.model.train_rows.toLocaleString("en-IN")} train / ${payload.model.test_rows.toLocaleString("en-IN")} test rows`;
   document.querySelector("#forecastExclusions").textContent =
     `${payload.model.outliers_removed} outliers removed · excluded sparse: ${payload.model.excluded_categories.join(", ") || "none"}`;
   document.querySelector("#forecastRetrained").textContent =

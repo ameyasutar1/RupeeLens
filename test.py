@@ -949,6 +949,15 @@ class ForecastTests(unittest.TestCase):
                 with self.assertRaises(ValueError):
                     forecast_model.forecast_spending(invalid)
 
+    def test_serverless_statistical_fallback(self):
+        with patch.object(forecast_model, "ML_STACK_AVAILABLE", False):
+            metadata = forecast_model.train_forecast_model(force=True)
+            prediction = forecast_model.forecast_spending(7)
+        self.assertEqual(metadata["runtime"], "serverless_fallback")
+        self.assertEqual(prediction["model"]["runtime"], "serverless_fallback")
+        self.assertEqual(len(prediction["daily_forecast"]), 7)
+        self.assertIn("statistical baseline", prediction["methodology"]["algorithm"].lower())
+
     def test_sparse_history_fails_cleanly(self):
         sparse_user = register_user("sparse")
         insert_transaction(
@@ -972,6 +981,7 @@ class SourceIntegrityTests(unittest.TestCase):
             "public/styles.css",
             "vercel.json",
             "requirements.txt",
+            "requirements-ml.txt",
         ]
         for relative_path in required:
             with self.subTest(path=relative_path):
@@ -985,6 +995,14 @@ class SourceIntegrityTests(unittest.TestCase):
         )
         self.assertNotIn("functions", configuration)
         self.assertTrue(Path("app.py").is_file())
+
+    def test_vercel_requirements_exclude_heavy_ml_stack(self):
+        deployment_requirements = Path("requirements.txt").read_text(encoding="utf-8")
+        local_ml_requirements = Path("requirements-ml.txt").read_text(encoding="utf-8")
+        for package in ("xgboost", "scikit-learn", "numpy", "scipy", "joblib"):
+            self.assertNotIn(package, deployment_requirements.lower())
+        self.assertIn("xgboost", local_ml_requirements.lower())
+        self.assertIn("scikit-learn", local_ml_requirements.lower())
 
     @unittest.skipUnless(shutil.which("node"), "Node.js is unavailable")
     def test_frontend_javascript_syntax(self):

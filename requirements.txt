@@ -1,8 +1,5 @@
 langchain
 langchain-google-genai
-xgboost
-scikit-learn
-joblib
 fastapi
 uvicorn[standard]
 python-multipart

@@ -7,7 +7,7 @@ A persistent local Python, HTML, CSS, JavaScript, and SQLite dashboard for suppo
 ```bash
 python3 -m venv .venv
 source .venv/bin/activate
-pip install -r requirements.txt
+pip install -r requirements-ml.txt
 cp .env.example .env
 ```
 
@@ -41,6 +41,11 @@ deployment files, and the repository privacy scan.
 
 Gemini and Vercel Blob network calls are intentionally replaced by deterministic local
 boundaries; those external services require separate deployment smoke tests.
+
+`requirements.txt` is intentionally serverless-light for Vercel. Local development installs
+`requirements-ml.txt`, which adds XGBoost, NumPy, SciPy, and scikit-learn. When that optional
+stack is unavailable, the deployed dashboard uses a robust recent weekday/category forecast
+instead of failing. Local installations continue to train the two-stage XGBoost model.
 
 Use **Import statement** or the dashboard drop zone whenever you download a new CSV. The import process:
 
@@ -90,6 +95,9 @@ configuration. The repository includes a minimal `vercel.json` and `.python-vers
    - `RUPEELENS_SIGNUP_CODE` — required to create accounts through the deployed login page
 
 5. Deploy.
+
+Do not add XGBoost or scikit-learn back to `requirements.txt`: their compiled dependency
+stack exceeds Vercel's 500 MB Python filesystem limit. Keep them in `requirements-ml.txt`.
 
 On Vercel, the application restores the private SQLite snapshot from Blob into its
 writable `/tmp` directory on cold start. Mutating operations checkpoint and upload
