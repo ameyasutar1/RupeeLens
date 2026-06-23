@@ -72,8 +72,10 @@ Never force-add an ignored financial or secret file.
 
 ## Deploy to Vercel
 
-Vercel automatically detects the top-level FastAPI `app` in `app.py`. The repository
-also includes `vercel.json` and `.python-version`.
+Vercel automatically detects the top-level FastAPI `app` in `app.py`. Do not add
+`app.py` under the `functions` block in `vercel.json`; current Vercel function globs
+there apply to files inside `api/`, while FastAPI framework detection needs no route
+configuration. The repository includes a minimal `vercel.json` and `.python-version`.
 
 1. Import the GitHub repository in Vercel and keep the **FastAPI** preset.
 2. Keep the root directory as `./`.

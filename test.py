@@ -977,6 +977,15 @@ class SourceIntegrityTests(unittest.TestCase):
             with self.subTest(path=relative_path):
                 self.assertTrue(Path(relative_path).is_file())
 
+    def test_vercel_uses_fastapi_auto_detection(self):
+        configuration = json.loads(Path("vercel.json").read_text(encoding="utf-8"))
+        self.assertEqual(
+            configuration.get("$schema"),
+            "https://openapi.vercel.sh/vercel.json",
+        )
+        self.assertNotIn("functions", configuration)
+        self.assertTrue(Path("app.py").is_file())
+
     @unittest.skipUnless(shutil.which("node"), "Node.js is unavailable")
     def test_frontend_javascript_syntax(self):
         for path in ("public/app.js", "public/login.js"):
